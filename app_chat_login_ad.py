@@ -93,7 +93,7 @@ if not st.session_state.auth["authenticated"]:
                 )
                 
                 result = app.acquire_token_by_authorization_code(
-                    query_params["code"][0],
+                    query_params["code"],
                     scopes=SCOPE,
                     redirect_uri=REDIRECT_URI
                 )
@@ -113,7 +113,7 @@ if not st.session_state.auth["authenticated"]:
                             "email": user_info["mail"],
                             "token": result['access_token']
                         }
-                        st.st.query_params
+                        # st.st.query_params
                         st.rerun()
                     else:
                         st.error("Acesso permitido apenas para colaboradores com email corporativo.")
@@ -195,7 +195,15 @@ def get_conversation_chain(retriever):
     )
 
 # 7.0 INTERFACE DO CHAT (mantido igual)
-st.markdown(""" **Exemplo de Bom Prompt:** "Você é um consultor sênior em mineração..." """)
+
+with st.expander("Boas práticas de prompt"):
+    st.markdown("### Para escrever um bom prompt alguns elementos são necessários, são eles:")
+    st.markdown("**Contexto:** Forneça informações de fundo ou contexto para orientar a conversa.")
+    st.markdown("**Instrução Clara:** Uma tarefa ou pergunta específica que você quer que o modelo execute.")
+    st.markdown("**Exemplos ou Casos de Uso:** Inclua exemplos ou cenários para ilustrar o que você espera.")
+    st.markdown("**Restrições ou Limitações:** Defina limites para a resposta, como tamanho, tom ou escopo.")
+    st.markdown("**Uso de Palavras-Chave:** Inclua palavras-chave relevantes para orientar o modelo. Exemplo: Discuta os impactos da mineração de ouro na **biodiversidade**, com foco em **desmatamento** e **contaminação da água**.")
+    st.markdown("**Formato de Resposta:** Especifique como você quer que a resposta seja estruturada.")
 
 uploaded_file = st.file_uploader(
     label="Escolha um arquivo PDF",
