@@ -13,16 +13,11 @@ import msal
 import requests
 from urllib.parse import urlencode
 
-# Carregar configurações
-credentials = yaml.safe_load(open('./credentials.yml'))
-OPENAI_API_KEY = credentials['openai']
-AAD_CONFIG = credentials['microsoft']
-
-# Configurações do Azure AD
-CLIENT_ID = AAD_CONFIG['client_id']
-TENANT_ID = AAD_CONFIG['tenant_id']
-CLIENT_SECRET = AAD_CONFIG['client_secret']
-REDIRECT_URI = AAD_CONFIG['redirect_uri']
+OPENAI_API_KEY = st.secrets.openai.api_key
+CLIENT_ID = st.secrets.microsoft.client_id
+TENANT_ID = st.secrets.microsoft.tenant_id
+CLIENT_SECRET = st.secrets.microsoft.client_secret
+REDIRECT_URI = st.secrets.microsoft.redirect_uri
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPE = ["User.Read"]
 
