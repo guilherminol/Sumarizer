@@ -1,20 +1,27 @@
-from langchain_community.document_loaders import PyPDFLoader  # type: ignore
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings  # type: ignore
-from langchain.chains import ConversationalRetrievalChain  # type: ignore
-from langchain.memory import ConversationBufferMemory  # type: ignore
-from langchain_community.vectorstores import FAISS  # type: ignore
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
-from langchain_core.prompts import PromptTemplate  # type: ignore
-from langchain_community.chat_message_histories import StreamlitChatMessageHistory  # type: ignore
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.prompts import PromptTemplate
 import streamlit as st
 import os
 from tempfile import NamedTemporaryFile
-import toml  # Importar a biblioteca toml
+import msal
+import requests
+from urllib.parse import urlencode
 
-# Load API Key
-OPENAI_API_KEY = st.secrets["api_key"]
+# Carregar configurações do st.secrets
+OPENAI_API_KEY = st.secrets.openai.api_key
+CLIENT_ID = st.secrets.microsoft.client_id
+TENANT_ID = st.secrets.microsoft.tenant_id
+CLIENT_SECRET = st.secrets.microsoft.client_secret
+REDIRECT_URI = st.secrets.microsoft.redirect_uri
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
+SCOPE = ["User.Read"]
 
-# 1.0 INITIALIZE SESSION STATE
+# 1.0 INICIALIZAR ESTADO DA SESSÃO
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "pdf_processed" not in st.session_state:
@@ -25,31 +32,131 @@ if "memory" not in st.session_state:
         return_messages=True,
         output_key="answer"
     )
+if "auth" not in st.session_state:
+    st.session_state.auth = {
+        "authenticated": False,
+        "user": None,
+        "email": None,
+        "token": None
+    }
 
-# 2.0 PROCESS PDF FUNCTION
+# 2.0 FUNÇÕES DE AUTENTICAÇÃO
+def get_aad_token():
+    cache = msal.SerializableTokenCache()
+    app = msal.ConfidentialClientApplication(
+        CLIENT_ID,
+        authority=AUTHORITY,
+        client_credential=CLIENT_SECRET,
+        token_cache=cache
+    )
+    
+    accounts = app.get_accounts()
+    if accounts:
+        result = app.acquire_token_silent(SCOPE, account=accounts[0])
+        return result
+    return None
+
+def validate_company_email(email):
+    return email.endswith("@hep.solutions")
+
+# 3.0 INTERFACE DE LOGIN
+if not st.session_state.auth["authenticated"]:
+    st.title("Acesso Corporativo")
+    st.markdown("Por favor, faça login com sua conta corporativa")
+
+    if st.button("Entrar com Microsoft"):
+        # Construir URL de autorização
+        query_params = {
+            "client_id": CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "scope": " ".join(SCOPE),
+            "response_mode": "query"
+        }
+        auth_url = f"{AUTHORITY}/oauth2/v2.0/authorize?{urlencode(query_params)}"
+        
+        # Forçar redirecionamento via header HTTP
+        st.markdown(f'<meta http-equiv="refresh" content="0; url={auth_url}">', unsafe_allow_html=True)
+        st.stop()  # Interrompe a execução para evitar conteúdo adicional
+        
+    query_params = st.query_params
+    if "code" in query_params:
+        with st.spinner("Autenticando..."):
+            try:
+                app = msal.ConfidentialClientApplication(
+                    CLIENT_ID,
+                    authority=AUTHORITY,
+                    client_credential=CLIENT_SECRET
+                )
+                
+                result = app.acquire_token_by_authorization_code(
+                    query_params["code"],
+                    scopes=SCOPE,
+                    redirect_uri=REDIRECT_URI
+                )
+
+                if "access_token" in result:
+                    user_info = requests.get(
+                        "https://graph.microsoft.com/v1.0/me",
+                        headers={"Authorization": f"Bearer {result['access_token']}"}
+                    ).json()
+
+                    if validate_company_email(user_info.get("mail", "")):
+                        st.session_state.auth = {
+                            "authenticated": True,
+                            "user": user_info["displayName"],
+                            "email": user_info["mail"],
+                            "token": result['access_token']
+                        }
+                        st.rerun()
+                    else:
+                        st.error("Acesso permitido apenas para colaboradores com email corporativo.")
+                else:
+                    st.error("Falha na autenticação: " + result.get("error_description", ""))
+            except Exception as e:
+                st.error(f"Erro na autenticação: {str(e)}")
+    
+    st.stop()
+
+# 4.0 INTERFACE PRINCIPAL
+st.title(f"Bem-vindo, {st.session_state.auth['user']}!")
+st.subheader("Chat com Documentos - H&P")
+
+if st.button("Sair"):
+    st.session_state.auth = {
+        "authenticated": False,
+        "user": None,
+        "email": None,
+        "token": None
+    }
+    st.session_state.memory.clear()
+    st.session_state.messages = []
+    st.rerun()
+
+# 5.0 PROCESSAMENTO DE PDF
 def process_pdf(file):
     with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(file.getvalue())
         file_path = tmp.name
-
+    
     try:
         loader = PyPDFLoader(file_path)
         docs = loader.load()
-
+        
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
         )
         splits = text_splitter.split_documents(docs)
-
+        
         embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY)
         vectorstore = FAISS.from_documents(splits, embeddings)
-
+        
         return vectorstore.as_retriever()
     finally:
         os.remove(file_path)
 
-# 3.0 CHAIN WITH MEMORY
+# 6.0 CADEIA DE CONVERSA
 def get_conversation_chain(retriever):
     template = """Você é um assistente especialista em análise de documentos. Use o contexto para responder.
     Contexto:
@@ -58,9 +165,9 @@ def get_conversation_chain(retriever):
     Histórico da Conversa:
     {chat_history}
 
-    Pergunta: {question}. Quando perguntado sobre algo responda apenas com base no contexto, caso não ache nenhuma resposta contida dentro do contexto, apenas responda "Nenhuma resposta baseada no documento encontrada!.". Isso se aplica somente a perguntas, pedidos de atividades devem ser feitos normalmente
+    Pergunta: {question}. Sempre responda apenas com base no contexto, caso não ache nenhuma resposta contida dentro do contexto, apenas responda "Nenhuma resposta baseada no documento encontrada!."
     Resposta útil:"""
-
+    
     prompt = PromptTemplate(
         template=template,
         input_variables=["context", "chat_history", "question"]
@@ -80,15 +187,7 @@ def get_conversation_chain(retriever):
         return_source_documents=True
     )
 
-# 4.0 STREAMLIT INTERFACE
-st.title("Chat com Documentos - H&P")
-st.subheader("Envie um PDF para conversar com o documento")
-
-st.markdown(
-    '### APLICATIVO EM FASE DE TESTES - <span style="color:red">USAR APENAS DADOS PÚBLICOS</span>',
-    unsafe_allow_html=True
-)
-
+# 7.0 INTERFACE DO CHAT
 with st.expander("Boas práticas de prompt"):
     st.markdown("### Para escrever um bom prompt alguns elementos são necessários, são eles:")
     st.markdown("**Contexto:** Forneça informações de fundo ou contexto para orientar a conversa.")
@@ -98,13 +197,11 @@ with st.expander("Boas práticas de prompt"):
     st.markdown("**Uso de Palavras-Chave:** Inclua palavras-chave relevantes para orientar o modelo. Exemplo: Discuta os impactos da mineração de ouro na **biodiversidade**, com foco em **desmatamento** e **contaminação da água**.")
     st.markdown("**Formato de Resposta:** Especifique como você quer que a resposta seja estruturada.")
 
-# Upload PDF
 uploaded_file = st.file_uploader(
     label="Escolha um arquivo PDF",
     type="pdf"
 )
 
-# Processar PDF
 if uploaded_file and not st.session_state.pdf_processed:
     with st.spinner("Processando PDF..."):
         try:
@@ -115,31 +212,25 @@ if uploaded_file and not st.session_state.pdf_processed:
         except Exception as e:
             st.error(f"Erro: {str(e)}")
 
-# Exibir histórico
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Input de chat
 if prompt := st.chat_input("Faça sua pergunta sobre o documento"):
     if not st.session_state.pdf_processed:
         st.warning("Envie um PDF primeiro.")
         st.stop()
-
-    # Adicionar mensagem do usuário
+    
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-
-    # Gerar resposta
+    
     with st.chat_message("assistant"):
         with st.spinner("Analisando..."):
             try:
                 response = st.session_state.qa_chain({"question": prompt})
                 answer = response["answer"]
-
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
-
             except Exception as e:
                 st.error(f"Erro: {str(e)}")
