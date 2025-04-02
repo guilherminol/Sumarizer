@@ -10,6 +10,7 @@ import os
 from tempfile import NamedTemporaryFile
 import msal
 import requests
+from urllib.parse import urlencode
 
 # Carregar configurações do st.secrets
 OPENAI_API_KEY = st.secrets.openai.api_key
@@ -64,17 +65,20 @@ if not st.session_state.auth["authenticated"]:
     st.markdown("Por favor, faça login com sua conta corporativa")
 
     if st.button("Entrar com Microsoft"):
-        app = msal.ConfidentialClientApplication(
-            CLIENT_ID,
-            authority=AUTHORITY,
-            client_credential=CLIENT_SECRET
-        )
-        auth_url = app.get_authorization_request_url(
-            SCOPE,
-            redirect_uri=REDIRECT_URI
-        )
-        st.markdown(f"[Clique aqui para autenticar]({auth_url})")
-
+        # Construir URL de autorização
+        query_params = {
+            "client_id": CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "scope": " ".join(SCOPE),
+            "response_mode": "query"
+        }
+        auth_url = f"{AUTHORITY}/oauth2/v2.0/authorize?{urlencode(query_params)}"
+        
+        # Forçar redirecionamento via header HTTP
+        st.markdown(f'<meta http-equiv="refresh" content="0; url={auth_url}">', unsafe_allow_html=True)
+        st.stop()  # Interrompe a execução para evitar conteúdo adicional
+        
     query_params = st.query_params
     if "code" in query_params:
         with st.spinner("Autenticando..."):
