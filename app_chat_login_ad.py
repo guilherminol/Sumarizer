@@ -27,16 +27,6 @@ AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPE = ["User.Read"]
 
 # 1.0 INICIALIZAR ESTADO DA SESSÃO
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "pdf_processed" not in st.session_state:
-    st.session_state.pdf_processed = False
-if "memory" not in st.session_state:
-    st.session_state.memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer"
-    )
 if "auth" not in st.session_state:
     st.session_state.auth = {
         "authenticated": False,
@@ -45,7 +35,16 @@ if "auth" not in st.session_state:
         "token": None
     }
 
+if "chats" not in st.session_state:
+    st.session_state.chats = {}
+
+if "active_chat" not in st.session_state:
+    st.session_state.active_chat = None
+
 # 2.0 FUNÇÕES DE AUTENTICAÇÃO
+def validate_company_email(email):
+    return email.endswith("@hep.solutions")
+
 def get_aad_token():
     cache = msal.SerializableTokenCache()
     app = msal.ConfidentialClientApplication(
@@ -54,96 +53,58 @@ def get_aad_token():
         client_credential=CLIENT_SECRET,
         token_cache=cache
     )
-    
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(SCOPE, account=accounts[0])
         return result
     return None
 
-def validate_company_email(email):
-    return email.endswith("@hep.solutions")  # Alterar para seu domínio
-
-# 3.0 INTERFACE DE LOGIN
-if not st.session_state.auth["authenticated"]:
-    st.title("Acesso Corporativo")
-    st.markdown("Por favor, faça login com sua conta corporativa")
-
-    if st.button("Entrar com Microsoft"):
-        # Construir URL de autorização
-        query_params = {
-            "client_id": CLIENT_ID,
-            "response_type": "code",
-            "redirect_uri": REDIRECT_URI,
-            "scope": " ".join(SCOPE),
-            "response_mode": "query"
-        }
-        auth_url = f"{AUTHORITY}/oauth2/v2.0/authorize?{urlencode(query_params)}"
-        
-        # Forçar redirecionamento via header HTTP
-        st.markdown(f'<meta http-equiv="refresh" content="0; url={auth_url}">', unsafe_allow_html=True)
-        st.stop()  # Interrompe a execução para evitar conteúdo adicional
-        
-    # Processar resposta do Azure AD
-    query_params = st.query_params
-    if "code" in query_params:
-        with st.spinner("Autenticando..."):
-            try:
-                app = msal.ConfidentialClientApplication(
-                    CLIENT_ID,
-                    authority=AUTHORITY,
-                    client_credential=CLIENT_SECRET
-                )
-                
-                result = app.acquire_token_by_authorization_code(
-                    query_params["code"],
-                    scopes=SCOPE,
-                    redirect_uri=REDIRECT_URI
-                )
-
-                if "access_token" in result:
-                    # Obter informações do usuário
-                    user_info = requests.get(
-                        "https://graph.microsoft.com/v1.0/me",
-                        headers={"Authorization": f"Bearer {result['access_token']}"}
-                    ).json()
-
-                    # Validar domínio do email
-                    if validate_company_email(user_info.get("mail", "")):
-                        st.session_state.auth = {
-                            "authenticated": True,
-                            "user": user_info["displayName"],
-                            "email": user_info["mail"],
-                            "token": result['access_token']
-                        }
-                        # st.st.query_params
-                        st.rerun()
-                    else:
-                        st.error("Acesso permitido apenas para colaboradores com email corporativo.")
-                else:
-                    st.error("Falha na autenticação: " + result.get("error_description", ""))
-            except Exception as e:
-                st.error(f"Erro na autenticação: {str(e)}")
-    
-    st.stop()
-
-# 4.0 INTERFACE PRINCIPAL
-st.title(f"Bem-vindo, {st.session_state.auth['user']}!")
-st.subheader("Chat com Documentos - H&P")
-
-# Botão de Logout
-if st.button("Sair"):
-    st.session_state.auth = {
-        "authenticated": False,
-        "user": None,
-        "email": None,
-        "token": None
+# 3.0 FUNÇÕES DE GERENCIAMENTO DE CHATS
+def create_new_chat():
+    chat_id = f"chat_{len(st.session_state.chats) + 1}"
+    st.session_state.chats[chat_id] = {
+        "id": chat_id,
+        "name": f"Chat {len(st.session_state.chats) + 1}",
+        "messages": [],
+        "memory": ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True,
+            output_key="answer"
+        ),
+        "pdf_processed": False,
+        "retriever": None,
+        "qa_chain": None
     }
-    st.session_state.memory.clear()
-    st.session_state.messages = []
-    st.rerun()
+    st.session_state.active_chat = chat_id
 
-# 5.0 PROCESSAMENTO DE PDF (mantido igual)
+def render_sidebar():
+    with st.sidebar:
+        st.header("Histórico de Chats")
+        
+        # Botão para novo chat
+        if st.button("➕ Novo Chat"):
+            create_new_chat()
+        
+        # Listagem dos chats existentes
+        for chat_id, chat in st.session_state.chats.items():
+            col1, col2 = st.columns([6,1])
+            with col1:
+                last_message = chat['messages'][-1]['content'][:20] + "..." if chat['messages'] else "Nova conversa"
+                if st.button(
+                    f"💬 {chat['name']}",
+                    key=f"btn_{chat_id}",
+                    help=last_message,
+                    use_container_width=True
+                ):
+                    st.session_state.active_chat = chat_id
+            with col2:
+                if st.button("🗑️", key=f"del_{chat_id}"):
+                    del st.session_state.chats[chat_id]
+                    if st.session_state.active_chat == chat_id:
+                        create_new_chat()
+                    st.rerun()
+
+# 4.0 PROCESSAMENTO DE PDF
 def process_pdf(file):
     with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(file.getvalue())
@@ -166,8 +127,8 @@ def process_pdf(file):
     finally:
         os.remove(file_path)
 
-# 6.0 CADEIA DE CONVERSA (mantido igual)
-def get_conversation_chain(retriever):
+# 5.0 CADEIA DE CONVERSA
+def get_conversation_chain(retriever, memory):
     template = """Você é um assistente especialista em análise de documentos. Use o contexto para responder.
     Contexto:
     {context}
@@ -192,56 +153,133 @@ def get_conversation_chain(retriever):
     return ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
-        memory=st.session_state.memory,
+        memory=memory,
         combine_docs_chain_kwargs={"prompt": prompt},
         return_source_documents=True
     )
 
-# 7.0 INTERFACE DO CHAT (mantido igual)
+# 6.0 INTERFACE DE LOGIN
+if not st.session_state.auth["authenticated"]:
+    st.title("Acesso Corporativo")
+    st.markdown("Por favor, faça login com sua conta corporativa")
 
-with st.expander("Boas práticas de prompt"):
-    st.markdown("### Para escrever um bom prompt alguns elementos são necessários, são eles:")
-    st.markdown("**Contexto:** Forneça informações de fundo ou contexto para orientar a conversa.")
-    st.markdown("**Instrução Clara:** Uma tarefa ou pergunta específica que você quer que o modelo execute.")
-    st.markdown("**Exemplos ou Casos de Uso:** Inclua exemplos ou cenários para ilustrar o que você espera.")
-    st.markdown("**Restrições ou Limitações:** Defina limites para a resposta, como tamanho, tom ou escopo.")
-    st.markdown("**Uso de Palavras-Chave:** Inclua palavras-chave relevantes para orientar o modelo. Exemplo: Discuta os impactos da mineração de ouro na **biodiversidade**, com foco em **desmatamento** e **contaminação da água**.")
-    st.markdown("**Formato de Resposta:** Especifique como você quer que a resposta seja estruturada.")
-
-uploaded_file = st.file_uploader(
-    label="Escolha um arquivo PDF",
-    type="pdf"
-)
-
-if uploaded_file and not st.session_state.pdf_processed:
-    with st.spinner("Processando PDF..."):
-        try:
-            st.session_state.retriever = process_pdf(uploaded_file)
-            st.session_state.qa_chain = get_conversation_chain(st.session_state.retriever)
-            st.session_state.pdf_processed = True
-            st.success("PDF carregado! Faça suas perguntas.")
-        except Exception as e:
-            st.error(f"Erro: {str(e)}")
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if prompt := st.chat_input("Faça sua pergunta sobre o documento"):
-    if not st.session_state.pdf_processed:
-        st.warning("Envie um PDF primeiro.")
+    if st.button("Entrar com Microsoft"):
+        query_params = {
+            "client_id": CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "scope": " ".join(SCOPE),
+            "response_mode": "query"
+        }
+        auth_url = f"{AUTHORITY}/oauth2/v2.0/authorize?{urlencode(query_params)}"
+        st.markdown(f'<meta http-equiv="refresh" content="0; url={auth_url}">', unsafe_allow_html=True)
         st.stop()
-    
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    
-    with st.chat_message("assistant"):
-        with st.spinner("Analisando..."):
+        
+    # Processar resposta do Azure AD
+    query_params = st.query_params
+    if "code" in query_params:
+        with st.spinner("Autenticando..."):
             try:
-                response = st.session_state.qa_chain({"question": prompt})
-                answer = response["answer"]
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                app = msal.ConfidentialClientApplication(
+                    CLIENT_ID,
+                    authority=AUTHORITY,
+                    client_credential=CLIENT_SECRET
+                )
+                
+                result = app.acquire_token_by_authorization_code(
+                    query_params["code"],
+                    scopes=SCOPE,
+                    redirect_uri=REDIRECT_URI
+                )
+
+                if "access_token" in result:
+                    user_info = requests.get(
+                        "https://graph.microsoft.com/v1.0/me",
+                        headers={"Authorization": f"Bearer {result['access_token']}"}
+                    ).json()
+
+                    if validate_company_email(user_info.get("mail", "")):
+                        st.session_state.auth = {
+                            "authenticated": True,
+                            "user": user_info["displayName"],
+                            "email": user_info["mail"],
+                            "token": result['access_token']
+                        }
+                        st.rerun()
+                    else:
+                        st.error("Acesso permitido apenas para colaboradores com email corporativo.")
+                else:
+                    st.error("Falha na autenticação: " + result.get("error_description", ""))
+            except Exception as e:
+                st.error(f"Erro na autenticação: {str(e)}")
+    
+    st.stop()
+
+# 7.0 INTERFACE PRINCIPAL
+if st.session_state.auth["authenticated"]:
+    if not st.session_state.chats:
+        create_new_chat()
+    
+    render_sidebar()
+    
+    active_chat = st.session_state.chats[st.session_state.active_chat]
+    
+    st.title(f"Bem-vindo, {st.session_state.auth['user']}!")
+    st.subheader(f"{active_chat['name']} - Chat com Documentos H&P")
+
+    if st.sidebar.button("Sair"):
+        st.session_state.auth = {
+            "authenticated": False,
+            "user": None,
+            "email": None,
+            "token": None
+        }
+        st.session_state.chats = {}
+        st.session_state.active_chat = None
+        st.rerun()
+
+    # 8.0 UPLOAD E PROCESSAMENTO DE PDF
+    uploaded_file = st.file_uploader(
+        label="Escolha um arquivo PDF",
+        type="pdf",
+        key=f"uploader_{active_chat['id']}"
+    )
+
+    if uploaded_file and not active_chat['pdf_processed']:
+        with st.spinner("Processando PDF..."):
+            try:
+                active_chat['retriever'] = process_pdf(uploaded_file)
+                active_chat['qa_chain'] = get_conversation_chain(
+                    active_chat['retriever'],
+                    active_chat['memory']
+                )
+                active_chat['pdf_processed'] = True
+                st.success("PDF carregado! Faça suas perguntas.")
             except Exception as e:
                 st.error(f"Erro: {str(e)}")
+
+    # 9.0 EXIBIÇÃO DE MENSAGENS
+    for message in active_chat['messages']:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # 10.0 TRATAMENTO DE INPUT DO USUÁRIO
+    if prompt := st.chat_input("Faça sua pergunta sobre o documento"):
+        if not active_chat['pdf_processed']:
+            st.warning("Envie um PDF primeiro.")
+            st.stop()
+        
+        active_chat['messages'].append({"role": "user", "content": prompt})
+        
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("Analisando..."):
+                try:
+                    response = active_chat['qa_chain']({"question": prompt})
+                    answer = response["answer"]
+                    st.markdown(answer)
+                    active_chat['messages'].append({"role": "assistant", "content": answer})
+                except Exception as e:
+                    st.error(f"Erro: {str(e)}")
