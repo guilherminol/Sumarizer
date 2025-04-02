@@ -8,15 +8,21 @@ from langchain_core.prompts import PromptTemplate
 import streamlit as st
 import os
 from tempfile import NamedTemporaryFile
+import yaml
 import msal
 import requests
+from urllib.parse import urlencode
 
-# Carregar configurações do st.secrets
-OPENAI_API_KEY = st.secrets.openai.api_key
-CLIENT_ID = st.secrets.microsoft.client_id
-TENANT_ID = st.secrets.microsoft.tenant_id
-CLIENT_SECRET = st.secrets.microsoft.client_secret
-REDIRECT_URI = st.secrets.microsoft.redirect_uri
+# Carregar configurações
+credentials = yaml.safe_load(open('./credentials.yml'))
+OPENAI_API_KEY = credentials['openai']
+AAD_CONFIG = credentials['microsoft']
+
+# Configurações do Azure AD
+CLIENT_ID = AAD_CONFIG['client_id']
+TENANT_ID = AAD_CONFIG['tenant_id']
+CLIENT_SECRET = AAD_CONFIG['client_secret']
+REDIRECT_URI = AAD_CONFIG['redirect_uri']
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPE = ["User.Read"]
 
@@ -56,7 +62,7 @@ def get_aad_token():
     return None
 
 def validate_company_email(email):
-    return email.endswith("@hep.solutions")
+    return email.endswith("@hep.solutions")  # Alterar para seu domínio
 
 # 3.0 INTERFACE DE LOGIN
 if not st.session_state.auth["authenticated"]:
@@ -64,19 +70,21 @@ if not st.session_state.auth["authenticated"]:
     st.markdown("Por favor, faça login com sua conta corporativa")
 
     if st.button("Entrar com Microsoft"):
-        app = msal.ConfidentialClientApplication(
-            CLIENT_ID,
-            authority=AUTHORITY,
-            client_credential=CLIENT_SECRET
-        )
-        auth_url = app.get_authorization_request_url(
-            SCOPE,
-            redirect_uri=REDIRECT_URI
-        )
-        # Redirecionamento automático via JavaScript
-        js = f"window.location.href = '{auth_url}'"
-        st.write(f'<script>{js}</script>', unsafe_allow_html=True)
-
+        # Construir URL de autorização
+        query_params = {
+            "client_id": CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "scope": " ".join(SCOPE),
+            "response_mode": "query"
+        }
+        auth_url = f"{AUTHORITY}/oauth2/v2.0/authorize?{urlencode(query_params)}"
+        
+        # Forçar redirecionamento via header HTTP
+        st.markdown(f'<meta http-equiv="refresh" content="0; url={auth_url}">', unsafe_allow_html=True)
+        st.stop()  # Interrompe a execução para evitar conteúdo adicional
+        
+    # Processar resposta do Azure AD
     query_params = st.query_params
     if "code" in query_params:
         with st.spinner("Autenticando..."):
@@ -94,11 +102,13 @@ if not st.session_state.auth["authenticated"]:
                 )
 
                 if "access_token" in result:
+                    # Obter informações do usuário
                     user_info = requests.get(
                         "https://graph.microsoft.com/v1.0/me",
                         headers={"Authorization": f"Bearer {result['access_token']}"}
                     ).json()
 
+                    # Validar domínio do email
                     if validate_company_email(user_info.get("mail", "")):
                         st.session_state.auth = {
                             "authenticated": True,
@@ -106,6 +116,7 @@ if not st.session_state.auth["authenticated"]:
                             "email": user_info["mail"],
                             "token": result['access_token']
                         }
+                        # st.st.query_params
                         st.rerun()
                     else:
                         st.error("Acesso permitido apenas para colaboradores com email corporativo.")
@@ -120,6 +131,7 @@ if not st.session_state.auth["authenticated"]:
 st.title(f"Bem-vindo, {st.session_state.auth['user']}!")
 st.subheader("Chat com Documentos - H&P")
 
+# Botão de Logout
 if st.button("Sair"):
     st.session_state.auth = {
         "authenticated": False,
@@ -131,7 +143,7 @@ if st.button("Sair"):
     st.session_state.messages = []
     st.rerun()
 
-# 5.0 PROCESSAMENTO DE PDF
+# 5.0 PROCESSAMENTO DE PDF (mantido igual)
 def process_pdf(file):
     with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(file.getvalue())
@@ -154,7 +166,7 @@ def process_pdf(file):
     finally:
         os.remove(file_path)
 
-# 6.0 CADEIA DE CONVERSA
+# 6.0 CADEIA DE CONVERSA (mantido igual)
 def get_conversation_chain(retriever):
     template = """Você é um assistente especialista em análise de documentos. Use o contexto para responder.
     Contexto:
@@ -185,7 +197,8 @@ def get_conversation_chain(retriever):
         return_source_documents=True
     )
 
-# 7.0 INTERFACE DO CHAT
+# 7.0 INTERFACE DO CHAT (mantido igual)
+
 with st.expander("Boas práticas de prompt"):
     st.markdown("### Para escrever um bom prompt alguns elementos são necessários, são eles:")
     st.markdown("**Contexto:** Forneça informações de fundo ou contexto para orientar a conversa.")
